@@ -1,0 +1,128 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository }}
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test -- --run
+      - run: npm run build
+      - run: npm audit --audit-level=high
+
+  api:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/api
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: blog
+          POSTGRES_USER: blog
+          POSTGRES_PASSWORD: blog
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U blog -d blog"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: maven
+      - run: mvn -B test
+      - run: mvn -B package -DskipTests
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-fs.sarif
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-fs.sarif
+      - uses: semgrep/semgrep-action@v1
+        with:
+          config: p/ci
+      - uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: blog-platform-api
+          path: services/api
+          format: HTML
+          args: >
+            --failOnCVSS 7
+
+  containers:
+    runs-on: ubuntu-latest
+    needs: [frontend, api, security]
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: apps/frontend
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/frontend:${{ github.sha }}
+            ${{ env.IMAGE_PREFIX }}/frontend:latest
+      - uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.IMAGE_PREFIX }}/frontend:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+      - uses: docker/build-push-action@v6
+        with:
+          context: services/api
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/api:${{ github.sha }}
+            ${{ env.IMAGE_PREFIX }}/api:latest
+      - uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.IMAGE_PREFIX }}/api:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"

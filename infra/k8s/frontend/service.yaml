@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: blog-frontend
+  namespace: blog-platform
+spec:
+  type: LoadBalancer
+  selector:
+    app: blog-frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
